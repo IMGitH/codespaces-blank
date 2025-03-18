@@ -11,24 +11,41 @@ FED_RATE_TICKER = '^IRX'  # 13-week Treasury Bill rate (proxy for Fed Rate)
 
 # --- Fetch Historical Prices ---
 def get_stock_data(ticker):
-    data = yf.download(ticker, start=START_DATE, end=END_DATE, interval='1mo')
-    data = data[['Adj Close']]
-    data.rename(columns={'Adj Close': ticker}, inplace=True)
-    return data
+    try:
+        data = yf.download(ticker, start=START_DATE, end=END_DATE, interval='1mo')
+        if data.empty:
+            print(f"Warning: No data fetched for {ticker}")
+            return None
+
+        if 'Close' not in data.columns:
+            print(f"Warning: 'Close' not found for {ticker}. Available columns: {list(data.columns)}")
+            return None
+
+        data = data[['Close']].rename(columns={'Close': ticker})
+        return data
+    except Exception as e:
+        print(f"Error fetching data for {ticker}: {e}")
+        return None
 
 # --- Fetch All Data ---
 def fetch_all_data():
     price_data = []
     for ticker in STOCK_TICKERS + [SP500_TICKER]:
         df = get_stock_data(ticker)
-        price_data.append(df)
+        if df is not None:
+            price_data.append(df)
+
+    if not price_data:
+        raise ValueError("No valid price data fetched.")
 
     merged_prices = pd.concat(price_data, axis=1)
     merged_prices = merged_prices.dropna()
 
-    # Fetch Fed Rate (monthly)
+    # Fetch Fed Rate (monthly interval)
     fed_rate = yf.download(FED_RATE_TICKER, start=START_DATE, end=END_DATE, interval='1mo')
-    fed_rate = fed_rate[['Adj Close']].rename(columns={'Adj Close': 'FedRate'})
+    if 'Close' not in fed_rate.columns:
+        raise ValueError(f"Fed Rate data missing 'Close'. Available columns: {list(fed_rate.columns)}")
+    fed_rate = fed_rate[['Close']].rename(columns={'Close': 'FedRate'})
     fed_rate = fed_rate / 100  # Convert to decimal rate
 
     merged = merged_prices.merge(fed_rate, left_index=True, right_index=True)
@@ -41,18 +58,24 @@ def calculate_returns(df):
     return returns
 
 # --- Create Label ---
-def create_labels(stock_returns, sp500_returns, fed_rate):
-    labels = {}
+def create_labels(stock_returns, sp500_returns_df, fed_rate):
+    aligned_labels = []
     for ticker in STOCK_TICKERS:
-        beat_sp500 = stock_returns[ticker] >= sp500_returns
-        beat_fed = stock_returns[ticker] >= fed_rate['FedRate']
-        labels[ticker] = (beat_sp500 & beat_fed).astype(int)
-    return pd.DataFrame(labels, index=stock_returns.index)
+        sr, sp500 = stock_returns[ticker].align(sp500_returns_df['SP500'], join='inner')
+        sr, fed = sr.align(fed_rate['FedRate'], join='inner')
+        beat_sp500 = sr >= sp500
+        beat_fed = sr >= fed
+        label_series = (beat_sp500 & beat_fed).astype(int)
+        label_series.name = ticker
+        aligned_labels.append(label_series)
+
+    labels_df = pd.concat(aligned_labels, axis=1)
+    return labels_df
 
 # --- Main ---
 if __name__ == "__main__":
     merged_data = fetch_all_data()
-    
+
     # Split prices
     price_df = merged_data[STOCK_TICKERS]
     sp500_df = merged_data[[SP500_TICKER]]
@@ -61,7 +84,7 @@ if __name__ == "__main__":
     stock_returns = calculate_returns(price_df)
     sp500_returns = calculate_returns(sp500_df).rename(columns={SP500_TICKER: 'SP500'})
 
-    labels = create_labels(stock_returns, sp500_returns['SP500'], fed_df)
+    labels = create_labels(stock_returns, sp500_returns, fed_df)
 
     # Preview
     print("Sample Data:")
